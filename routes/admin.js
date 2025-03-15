@@ -2,109 +2,155 @@ const { Router } = require("express");
 const adminRouter = Router();
 const { adminModel, courseModel } = require("../db");
 const jwt = require("jsonwebtoken");
-// brcypt, zod, jsonwebtoken
-const  { JWT_ADMIN_PASSWORD } = require("../config");
+const bcrypt = require("bcrypt");
+const zod = require("zod");
+const { JWT_ADMIN_PASSWORD } = require("../config");
 const { adminMiddleware } = require("../middleware/admin");
 
+const signupSchema = zod.object({
+    email: zod.string().email(),
+    password: zod.string().min(8).refine(
+        (password) => {
+            const hasUppercase = /[A-Z]/.test(password);
+            const hasLowercase = /[a-z]/.test(password);
+            const hasNumber = /[0-9]/.test(password);
+            const hasSpecialChar = /[!@#$%^&*()_+{}\[\]:;<>,.?~\\/-]/.test(password);
 
-adminRouter.post("/signup", async function(req, res) {
-    const { email, password, firstName, lastName } = req.body; // TODO: adding zod validation
-    // TODO: hash the password so plaintext pw is not stored in the DB
+            return hasUppercase && hasLowercase && hasNumber && hasSpecialChar;
+        },
+        {
+            message:
+                "Password must contain at least 8 characters, one uppercase, one lowercase, one number, and one special character",
+        }
+    ),
+    firstName: zod.string(),
+    lastName: zod.string(),
+});
 
-    // TODO: Put inside a try catch block
-    await adminModel.create({
-        email: email,
-        password: password,
-        firstName: firstName, 
-        lastName: lastName
-    })
-    
-    res.json({
-        message: "Signup succeeded"
-    })
-})
+adminRouter.post("/signup", async function (req, res) {
+    try {
+        const { success } = signupSchema.safeParse(req.body);
 
-adminRouter.post("/signin", async function(req, res) {
-    const { email, password } = req.body;
+        if (!success) {
+            return res.status(400).json({ message: "Incorrect inputs" });
+        }
 
-    // TODO: ideally password should be hashed, and hence you cant compare the user provided password and the database password
-    const admin = await adminModel.findOne({
-        email: email,
-        password: password
-    });
+        const { email, password, firstName, lastName } = req.body;
 
-    if (admin) {
-        const token = jwt.sign({
-            id: admin._id
-        }, JWT_ADMIN_PASSWORD);
+        const existingAdmin = await adminModel.findOne({ email });
+        if (existingAdmin) {
+            return res.status(400).json({ message: "Admin with this email already exists" });
+        }
 
-        // Do cookie logic
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        res.json({
-            token: token
-        })
-    } else {
-        res.status(403).json({
-            message: "Incorrect credentials"
-        })
+        const newAdmin = await adminModel.create({
+            email,
+            password: hashedPassword,
+            firstName,
+            lastName,
+        });
+
+        const token = jwt.sign({ id: newAdmin._id }, JWT_ADMIN_PASSWORD);
+
+        res.json({ message: "Signup succeeded", token });
+    } catch (error) {
+        console.error("Signup error:", error);
+        res.status(500).json({ message: "Internal server error" });
     }
-})
+});
 
-adminRouter.post("/course", adminMiddleware, async function(req, res) {
-    const adminId = req.userId;
+adminRouter.post("/signin", async function (req, res) {
+    try {
+        const { email, password } = req.body;
 
-    const { title, description, imageUrl, price } = req.body;
+        const admin = await adminModel.findOne({ email });
 
-    // creating a web3 saas in 6 hours
-    const course = await courseModel.create({
-        title: title, 
-        description: description, 
-        imageUrl: imageUrl, 
-        price: price, 
-        creatorId: adminId
-    })
+        if (!admin) {
+            return res.status(403).json({ message: "Incorrect credentials" });
+        }
 
-    res.json({
-        message: "Course created",
-        courseId: course._id
-    })
-})
+        const passwordMatch = await bcrypt.compare(password, admin.password);
+        if (!passwordMatch) {
+            return res.status(403).json({ message: "Incorrect credentials" });
+        }
 
-adminRouter.put("/course", adminMiddleware, async function(req, res) {
-    const adminId = req.userId;
+        const token = jwt.sign({ id: admin._id }, JWT_ADMIN_PASSWORD);
+        res.json({ token });
+    } catch (error) {
+        console.error("Signin error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+});
 
-    const { title, description, imageUrl, price, courseId } = req.body;
+const courseSchema = zod.object({
+    title: zod.string(),
+    description: zod.string(),
+    imageUrl: zod.string().url(),
+    price: zod.number(),
+});
 
-    // creating a web3 saas in 6 hours
-    const course = await courseModel.updateOne({
-        _id: courseId, 
-        creatorId: adminId 
-    }, {
-        title: title, 
-        description: description, 
-        imageUrl: imageUrl, 
-        price: price
-    })
+adminRouter.post("/course", adminMiddleware, async function (req, res) {
+    try {
+        const adminId = req.userId;
+        const { success } = courseSchema.safeParse(req.body);
 
-    res.json({
-        message: "Course updated",
-        courseId: course._id
-    })
-})
+        if (!success) {
+            return res.status(400).json({ message: "Incorrect inputs" });
+        }
 
-adminRouter.get("/course/bulk", adminMiddleware,async function(req, res) {
-    const adminId = req.userId;
+        const { title, description, imageUrl, price } = req.body;
 
-    const courses = await courseModel.find({
-        creatorId: adminId 
-    });
+        const course = await courseModel.create({
+            title,
+            description,
+            imageUrl,
+            price,
+            creatorId: adminId,
+        });
 
-    res.json({
-        message: "Course updated",
-        courses
-    })
-})
+        res.json({ message: "Course created", courseId: course._id });
+    } catch (error) {
+        console.error("Create course error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+});
+
+adminRouter.put("/course", adminMiddleware, async function (req, res) {
+    try {
+        const adminId = req.userId;
+        const { courseId, ...updates } = req.body;
+
+        const course = await courseModel.findOneAndUpdate(
+            { _id: courseId, creatorId: adminId },
+            updates,
+            { new: true }
+        );
+
+        if (!course) {
+            return res.status(404).json({ message: "Course not found" });
+        }
+
+        res.json({ message: "Course updated successfully", course });
+    } catch (error) {
+        console.error("Update course error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+});
+
+adminRouter.get("/course/bulk", adminMiddleware, async function (req, res) {
+    try {
+        const adminId = req.userId;
+
+        const courses = await courseModel.find({ creatorId: adminId });
+
+        res.json({ courses });
+    } catch (error) {
+        console.error("Get bulk courses error:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+});
 
 module.exports = {
-    adminRouter: adminRouter
-}
+    adminRouter: adminRouter,
+};

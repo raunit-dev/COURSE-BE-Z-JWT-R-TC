@@ -7,7 +7,13 @@ courseRouter.post("/purchase", userMiddleware, async function(req, res) {
     const userId = req.userId;
     const courseId = req.body.courseId;
 
-    // should check that the user has actually paid the price
+    const course = await courseModel.findById(courseId);
+
+    if (!course) {
+        return res.status(404).json({ message: "Course not found" });
+    }
+
+
     await purchaseModel.create({
         userId,
         courseId
